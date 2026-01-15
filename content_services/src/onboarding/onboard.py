@@ -1085,7 +1085,7 @@ def run_codebase_connection(
         s3_resource = resource("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
         s3_bucket = s3_resource.Bucket(org_id_bucket)
         dropzone_bucket, dropzone_key = parse_presigned_url(presigned_url)
-        s3 = client("s3")
+        s3 = client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
         response = s3.head_object(Bucket=dropzone_bucket, Key=dropzone_key)
 
         # Extract metadata from S3 object

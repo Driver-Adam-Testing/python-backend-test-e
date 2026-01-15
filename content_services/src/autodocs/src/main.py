@@ -131,7 +131,9 @@ async def run_autodoc(
                     hashed_org_id = hashlib.sha256(org_id.encode()).hexdigest()[:63]
                     key = f"assets/{hashed_org_id}/{version_node_id}/custom_config.toml"
 
-                    s3 = boto3.client("s3")
+                    s3 = boto3.client(
+                        "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
+                    )
                     # download the file from S3
                     if wait_for_guard_duty_tag(bucket=bucket, key=key):
                         print(

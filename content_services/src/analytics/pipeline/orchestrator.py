@@ -13,6 +13,7 @@ Coordinates all phases of the analytics pipeline:
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -593,7 +594,9 @@ class AnalyticsPipeline:
         # This writes records directly to S3 as Parquet chunks instead of accumulating in memory
         import boto3
 
-        s3_client = boto3.client("s3")
+        s3_client = boto3.client(
+            "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
+        )
 
         # Get initial chunk counts from checkpoint if resuming
         initial_commit_chunk_count = 0
@@ -991,7 +994,7 @@ class AnalyticsPipeline:
 
         # Try to download existing file
         try:
-            s3 = boto3.client("s3")
+            s3 = boto3.client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
             response = s3.get_object(Bucket=bucket, Key=key)
             existing_data = json.loads(response["Body"].read().decode("utf-8"))
             codebases = existing_data.get("codebases", [])
@@ -1055,7 +1058,7 @@ class AnalyticsPipeline:
         # First get the current codebases list to compute totals
         codebases = []
         try:
-            s3 = boto3.client("s3")
+            s3 = boto3.client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
             response = s3.get_object(Bucket=bucket, Key="analytics/codebases_list.json")
             existing_data = json.loads(response["Body"].read().decode("utf-8"))
             codebases = existing_data.get("codebases", [])
@@ -1110,7 +1113,7 @@ class AnalyticsPipeline:
         import boto3
         from botocore.exceptions import ClientError
 
-        s3 = boto3.client("s3")
+        s3 = boto3.client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
         key = f"analytics/{codebase_id}/branches.json"
 
         try:
@@ -1246,7 +1249,7 @@ class AnalyticsPipeline:
         import boto3
         from botocore.exceptions import ClientError
 
-        s3 = boto3.client("s3")
+        s3 = boto3.client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
         key = f"analytics/{codebase_id}/metadata.json"
 
         try:

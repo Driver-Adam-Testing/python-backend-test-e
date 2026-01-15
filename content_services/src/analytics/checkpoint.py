@@ -8,6 +8,7 @@ This module provides:
 
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -132,7 +133,9 @@ def upload_checkpoint(
         s3_client: Optional boto3 S3 client (for testing)
     """
     if s3_client is None:
-        s3_client = boto3.client("s3")
+        s3_client = boto3.client(
+            "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
+        )
 
     key = _get_checkpoint_key(checkpoint.codebase_id)
     body = checkpoint.model_dump_json().encode("utf-8")
@@ -196,7 +199,9 @@ def download_checkpoint(
         ExtractionCheckpoint if found and valid, None otherwise
     """
     if s3_client is None:
-        s3_client = boto3.client("s3")
+        s3_client = boto3.client(
+            "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
+        )
 
     key = _get_checkpoint_key(codebase_id)
 
@@ -250,7 +255,9 @@ def delete_checkpoint(
         s3_client: Optional boto3 S3 client (for testing)
     """
     if s3_client is None:
-        s3_client = boto3.client("s3")
+        s3_client = boto3.client(
+            "s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL")
+        )
 
     key = _get_checkpoint_key(codebase_id)
     logger.info(f"Deleting checkpoint at s3://{bucket}/{key}")

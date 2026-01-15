@@ -580,9 +580,11 @@ def parse_presigned_url(url: str) -> tuple[str, str]:
     path = parsed_url.path.lstrip("/")  # Remove leading slash
 
     # Extract bucket from the domain
-    if ".s3." in host:  # Domain-style
+    if ".s3." in host:  # AWS domain-style: bucket.s3.region.amazonaws.com
         bucket = host.split(".s3.")[0]
-    elif host.startswith(("s3-", "s3.")):  # Path-style
+    elif (
+        host.startswith(("s3-", "s3.")) or ":" in host or host in ("minio", "localhost")
+    ):  # AWS path-style: s3.region.amazonaws.com/bucket
         bucket = path.split("/")[0]
         path = "/".join(path.split("/")[1:])
     else:
