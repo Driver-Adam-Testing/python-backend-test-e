@@ -83,8 +83,11 @@ services:
       - .env
     environment:
       - ENVIRONMENT=local
-      - PYTHONPATH=/app
+      - PYTHONPATH=/app:/packages/driver_db:/packages/shared
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS}
+      # Override DATABASE_URL to use 'db' hostname instead of 'localhost' for container networking
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      - ASYNC_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
 
       - POSTGRES_SERVER=${POSTGRES_SERVER}
       - POSTGRES_PORT=${POSTGRES_PORT}
