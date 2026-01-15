@@ -5,13 +5,16 @@ Test script for running the inspector locally.
 Usage:
     cd backend
 
-    # Upload and trigger connection workflow:
-    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip --trigger
+    # Full workflow (upload, connect, wait, run inspector):
+    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip
 
-    # Delete existing codebase (by folder name in zip) before re-uploading:
-    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip --trigger --delete
+    # Full workflow with delete:
+    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip -d
 
-    # Trigger inspector for existing version:
+    # Connection only (don't wait or run inspector):
+    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip --connect-only
+
+    # Inspector only for existing version:
     poetry run python scripts/test_inspector_local.py --inspector <version-id>
 
 Prerequisites:
@@ -22,10 +25,9 @@ import argparse
 import hashlib
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Override Docker hostnames with localhost for host-side script
 if "minio:" in os.environ.get("AWS_S3_ENDPOINT_URL", ""):
@@ -166,7 +168,7 @@ def generate_presigned_url(org_id: str, primary_asset_id: str, version_id: str) 
 
 def trigger_connection(
     presigned_url: str, codebase_name: str, org_id: str, version_id: str
-):
+) -> str:
     from hatchet_sdk import Hatchet
     from shared.interfaces.hatchet_interfaces import RunCodebaseConnectionInput
 
@@ -185,9 +187,10 @@ def trigger_connection(
         )
     )
     print(f"Connection workflow triggered: {result.workflow_run_id}")
+    return result.workflow_run_id
 
 
-def trigger_inspector(version_id: str):
+def trigger_inspector(version_id: str) -> str:
     from hatchet_sdk import Hatchet
     from shared.interfaces.hatchet_interfaces import InspectorInput
 
@@ -195,6 +198,42 @@ def trigger_inspector(version_id: str):
     task = hatchet.stubs.task(name="inspector-workflow", input_validator=InspectorInput)
     result = task.run_no_wait(InspectorInput(version_id=version_id))
     print(f"Inspector workflow triggered: {result.workflow_run_id}")
+    return result.workflow_run_id
+
+
+def wait_for_connection(version_id: str, timeout: int = 120) -> bool:
+    from database.models import Version
+    from database.models_enums import VersionStatus
+
+    print(f"Waiting for connection to complete (timeout: {timeout}s)...")
+    start = time.time()
+    last_status = None
+
+    while time.time() - start < timeout:
+        with Session(engine) as session:
+            version = session.get(Version, version_id)
+            if not version:
+                print(f"Version {version_id} not found")
+                return False
+
+            if version.status != last_status:
+                print(f"  Status: {version.status.value}")
+                last_status = version.status
+
+            if version.status == VersionStatus.CONNECTED:
+                print("Connection complete!")
+                return True
+            if version.status in (
+                VersionStatus.CONNECTION_FAILED,
+                VersionStatus.GENERATION_ERROR,
+            ):
+                print(f"Connection failed with status: {version.status.value}")
+                return False
+
+        time.sleep(2)
+
+    print(f"Timeout waiting for connection after {timeout}s")
+    return False
 
 
 def get_zip_folder_name(zip_path: Path) -> str:
@@ -208,22 +247,48 @@ def get_zip_folder_name(zip_path: Path) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test inspector locally")
+    parser = argparse.ArgumentParser(
+        description="Test inspector locally",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Full workflow (upload, connect, wait, inspector):
+  %(prog)s ~/Downloads/code.zip
+
+  # Full workflow with delete existing:
+  %(prog)s ~/Downloads/code.zip -d
+
+  # Connection only:
+  %(prog)s ~/Downloads/code.zip --connect-only
+
+  # Inspector only:
+  %(prog)s --inspector <version-id>
+""",
+    )
     parser.add_argument(
         "zip_path", type=Path, nargs="?", help="Path to codebase zip file"
     )
     parser.add_argument(
-        "--trigger",
+        "-d",
+        "--delete",
         action="store_true",
-        help="Trigger connection workflow after upload",
+        help="Delete existing codebase before upload",
     )
     parser.add_argument(
-        "--delete", action="store_true", help="Delete existing codebase before upload"
+        "--connect-only",
+        action="store_true",
+        help="Only run connection workflow (don't wait or run inspector)",
     )
     parser.add_argument(
         "--inspector",
         metavar="VERSION_ID",
         help="Trigger inspector for existing version",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Timeout in seconds for waiting on connection (default: 120)",
     )
 
     args = parser.parse_args()
@@ -277,19 +342,30 @@ def main():
     print(f"\nVersion ID: {version_id}")
     print("Monitor: http://localhost:8080")
 
-    # Trigger if requested
-    if args.trigger:
-        presigned_url = generate_presigned_url(org_id, primary_asset_id, version_id)
-        trigger_connection(presigned_url, codebase_name, org_id, version_id)
-        print("\nAfter connection completes, run inspector:")
+    # Trigger connection
+    presigned_url = generate_presigned_url(org_id, primary_asset_id, version_id)
+    trigger_connection(presigned_url, codebase_name, org_id, version_id)
+
+    if args.connect_only:
+        print("\nTo run inspector after connection completes:")
         print(
             f"  poetry run python scripts/test_inspector_local.py --inspector {version_id}"
         )
+        return
+
+    # Wait for connection and run inspector
+    print()
+    if wait_for_connection(version_id, timeout=args.timeout):
+        print()
+        trigger_inspector(version_id)
+        print("\nMonitor inspector progress:")
+        print("  docker logs -f driver-ai-app-hatchet-worker-heavy-1")
     else:
-        print("\nTo trigger connection workflow:")
+        print("\nConnection did not complete. To retry inspector manually:")
         print(
-            f"  poetry run python scripts/test_inspector_local.py {args.zip_path} --trigger"
+            f"  poetry run python scripts/test_inspector_local.py --inspector {version_id}"
         )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
