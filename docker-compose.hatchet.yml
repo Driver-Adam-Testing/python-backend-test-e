@@ -121,13 +121,15 @@ services:
     build:
       context: .
       dockerfile: content_services/Dockerfile
-    command: poetry run python src/worker.py
+    command: python src/worker.py
     restart: on-failure
+    volumes:
+      - ./content_services:/app
+      - ./packages:/packages
     env_file:
       - .env
     environment:
       ENVIRONMENT: local
-      PYTHONPATH: /app/src
       WORKFLOW_SET_NAME: base
       POSTGRES_SERVER: db
       POSTGRES_PORT: ${POSTGRES_PORT}
@@ -156,13 +158,15 @@ services:
     build:
       context: .
       dockerfile: content_services/Dockerfile
-    command: poetry run python src/worker.py
+    command: python src/worker.py
     restart: on-failure
+    volumes:
+      - ./content_services:/app
+      - ./packages:/packages
     env_file:
       - .env
     environment:
       ENVIRONMENT: local
-      PYTHONPATH: /app/src
       WORKFLOW_SET_NAME: heavy
       POSTGRES_SERVER: db
       POSTGRES_PORT: ${POSTGRES_PORT}

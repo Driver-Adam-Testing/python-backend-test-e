@@ -6,16 +6,16 @@ Usage:
     cd backend
 
     # Full workflow (upload, connect, wait, run inspector):
-    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip
+    uv run python scripts/test_inspector_local.py ~/Downloads/code.zip
 
     # Full workflow with delete:
-    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip -d
+    uv run python scripts/test_inspector_local.py ~/Downloads/code.zip -d
 
     # Connection only (don't wait or run inspector):
-    poetry run python scripts/test_inspector_local.py ~/Downloads/code.zip --connect-only
+    uv run python scripts/test_inspector_local.py ~/Downloads/code.zip --connect-only
 
     # Inspector only for existing version:
-    poetry run python scripts/test_inspector_local.py --inspector <version-id>
+    uv run python scripts/test_inspector_local.py --inspector <version-id>
 
 Prerequisites:
     docker compose -f docker-compose.yml -f docker-compose.hatchet.yml up -d
@@ -349,7 +349,7 @@ Examples:
     if args.connect_only:
         print("\nTo run inspector after connection completes:")
         print(
-            f"  poetry run python scripts/test_inspector_local.py --inspector {version_id}"
+            f"  uv run python scripts/test_inspector_local.py --inspector {version_id}"
         )
         return
 
@@ -363,7 +363,7 @@ Examples:
     else:
         print("\nConnection did not complete. To retry inspector manually:")
         print(
-            f"  poetry run python scripts/test_inspector_local.py --inspector {version_id}"
+            f"  uv run python scripts/test_inspector_local.py --inspector {version_id}"
         )
         sys.exit(1)
 
