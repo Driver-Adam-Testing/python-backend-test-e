@@ -90,19 +90,6 @@ def test_llm_message_to_string(llm_message: LlmMessage) -> None:
     assert llm_message.message_kind == MessageKind.USER
 
 
-def test_to_persistent_llm_message(llm_message: LlmMessage) -> None:
-    persistent_llm_message = llm_message.to_persistent_llm_message()
-    assert persistent_llm_message.llm_message_json["content"] == "Hello, world!"
-    assert persistent_llm_message.llm_message_json["message_kind"] == MessageKind.USER
-
-
-def test_from_persistent_llm_message(llm_message: LlmMessage) -> None:
-    persistent_llm_message = llm_message.to_persistent_llm_message()
-    assert persistent_llm_message.llm_message_json["content"] == "Hello, world!"
-    assert persistent_llm_message.llm_message_json["message_kind"] == MessageKind.USER
-    assert llm_message == LlmMessage.from_persistent_llm_message(persistent_llm_message)
-
-
 def test_from_openai_chat_completion_message(
     openai_chat_completion_message: ChatCompletionMessage,
 ) -> None:
@@ -134,13 +121,6 @@ def test_tool_call_response_message(
     tool_response: LlmMessage = tool_requests[0].parsed_tool._execute()
     assert tool_response.content == "success"
     assert tool_response.message_kind == MessageKind.TOOL_CALL_RESPONSE
-
-
-def test_llm_message_to_persistent_llm_message() -> None:
-    llm_message = LlmMessage(content="Hello, world!", message_kind=MessageKind.USER)
-    persistent_llm_message = llm_message.to_persistent_llm_message()
-    assert persistent_llm_message.llm_message_json["content"] == "Hello, world!"
-    assert persistent_llm_message.llm_message_json["message_kind"] == MessageKind.USER
 
 
 def test_llm_message_from_openai_parsed_chat_completion_message(
