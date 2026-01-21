@@ -17,6 +17,7 @@ class AWSS3Client:
         self.aws_config = aws_config
         self.s3_client = boto3.client(
             "s3",
+            endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"),
         )
 
     def create_bucket_if_dne(self, bucket_name: str) -> None:

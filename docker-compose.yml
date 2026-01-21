@@ -12,6 +12,38 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
       - POSTGRES_USER=${POSTGRES_USER?Variable not set}
       - POSTGRES_DB=${POSTGRES_DB?Variable not set}
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set minio http://minio:9000 minioadmin minioadmin &&
+      mc mb minio/dropzone --ignore-existing &&
+      mc mb minio/inspector --ignore-existing &&
+      echo 'Buckets created successfully'
+      "
+    restart: "no"
   #  db-initializer:
   #    image: db-init
   #    build:
@@ -45,13 +77,17 @@ services:
       - default
     depends_on:
       - db
+      - minio
     #      - db-initializer
     env_file:
       - .env
     environment:
       - ENVIRONMENT=local
-      - PYTHONPATH=/app
+      - PYTHONPATH=/app:/packages/driver_db:/packages/shared
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS}
+      # Override DATABASE_URL to use 'db' hostname instead of 'localhost' for container networking
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      - ASYNC_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
 
       - POSTGRES_SERVER=${POSTGRES_SERVER}
       - POSTGRES_PORT=${POSTGRES_PORT}
@@ -76,3 +112,4 @@ services:
       - DROPZONE_BUCKET_NAME=${DROPZONE_BUCKET_NAME?Variable not set}
 volumes:
   app-db-data:
+  minio-data:
