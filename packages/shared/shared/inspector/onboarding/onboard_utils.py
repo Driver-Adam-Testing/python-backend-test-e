@@ -590,6 +590,8 @@ def parse_presigned_url(url: str) -> tuple[str, str]:
     else:
         raise ValueError("Invalid S3 URL format")
     key = unquote_plus(path)
+    if not bucket or not key:
+        raise ValueError("Invalid S3 URL: missing bucket or key")
     return bucket, key
 
 

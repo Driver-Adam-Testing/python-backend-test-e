@@ -103,7 +103,6 @@ services:
       - AWS_REGION=${AWS_REGION?Variable not set}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID?Variable not set}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY?Variable not set}
-      - AWS_S3_ENDPOINT_URL=${AWS_S3_ENDPOINT_URL:-}
       - PORT=4000
       - MODAL_TOKEN_ID=${MODAL_TOKEN_ID?Variable not set}
       - MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET?Variable not set}
