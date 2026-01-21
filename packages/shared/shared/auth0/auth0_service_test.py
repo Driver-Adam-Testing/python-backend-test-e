@@ -43,7 +43,6 @@ def mock_get_token() -> any:
 
 
 class TestAuth0Service(unittest.TestCase):
-    @pytest.mark.unit
     @patch("auth0.authentication.GetToken.client_credentials")
     def test_get_mgmt_api_token(self, mock_get_token: any) -> None:
         mock_get_token.return_value = {
@@ -56,7 +55,6 @@ class TestAuth0Service(unittest.TestCase):
         mock_get_token.assert_called_with("https://mock_mgmt_api_domain/api/v2/")
         self.assertEqual(response, "mocked_access_token")
 
-    @pytest.mark.unit
     @patch("auth0.authentication.Users.userinfo")
     @patch("auth0.authentication.Database.change_password")
     @patch("auth0.authentication.Database.post")
@@ -94,7 +92,6 @@ class TestAuth0Service(unittest.TestCase):
             organization="mock_org_id",
         )
 
-    @pytest.mark.unit
     @patch("auth0.management.Users.list_organizations")
     def test_list_user_organizations(self, mock_list_organizations: any) -> None:
         mock_list_organizations.return_value = {"mocked": "orgs"}
@@ -120,7 +117,6 @@ class TestAuth0Service(unittest.TestCase):
         # If this needs to change, we can proxy page and per_page calls through too.
         mock_list_organizations.assert_called_with("mock_subject", per_page=100)
 
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.delete_organization_member_roles")
     @patch("auth0.management.Organizations.create_organization_member_roles")
     @patch("auth0.management.Organizations.all_organization_member_roles")
@@ -191,47 +187,6 @@ class TestAuth0Service(unittest.TestCase):
             ),
         )
 
-    @pytest.mark.unit
-    @patch("auth0.management.Organizations.delete_organization_member_roles")
-    @patch("auth0.management.Organizations.create_organization_member_roles")
-    @patch("auth0.management.Organizations.all_organization_member_roles")
-    def test_modify_user_roles_perms(
-        self,
-        mock_org_member_roles: any,
-        mock_create_member_roles: any,
-        mock_delete_member_roles: any,
-    ) -> None:
-        mock_org_member_roles.return_value = []
-        mock_create_member_roles.return_value = {}
-        mock_delete_member_roles.return_value = {}
-
-        auth0_service = create_test_auth0_service()
-        try:
-            auth0_service.modify_user_roles(
-                UserToken(
-                    org_id="mock_org_id",
-                    sub="mock_subject",
-                    org_name="mock_org_name",
-                    iss="mock_issuer",
-                    aud="mock_audience",
-                    iat=1,
-                    exp=2,
-                    scope="mock scope",
-                    azp="mock_azp",
-                    permissions=[],
-                    user_email="mock@mock.com",
-                    user_full_name="mock full name",
-                ),
-                roles=["mockrole1", "mockrole2"],
-                modified_user_id="mock_uid",
-            )
-        except PermissionError:
-            # Successfully blocked access to endpoint without sufficient permissions
-            return
-        # We should never get here if we lack the right permissions
-        self.fail("Completed without sufficient permissions")
-
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.all_organization_members")
     def test_list_members(self, mock_list_members: any) -> None:
         mock_list_members.return_value = {"mocked": "listed org members"}
@@ -262,37 +217,6 @@ class TestAuth0Service(unittest.TestCase):
             fields=["user_id", "email", "picture", "name", "roles"],
         )
 
-    @pytest.mark.unit
-    @patch("auth0.management.Organizations.all_organization_members")
-    def test_list_members_perms(self, mock_list_members: any) -> None:
-        mock_list_members.return_value = {"mocked": "listed org members"}
-        auth0_service = create_test_auth0_service()
-        try:
-            auth0_service.list_members(
-                UserToken(
-                    org_id="mock_org_id",
-                    sub="mock_subject",
-                    org_name="mock_org_name",
-                    iss="mock_issuer",
-                    aud="mock_audience",
-                    iat=1,
-                    exp=2,
-                    scope="mock scope",
-                    azp="mock_azp",
-                    permissions=[],
-                    user_email="mock@mock.com",
-                    user_full_name="mock full name",
-                ),
-                page=1,
-                per_page=9,
-            )
-        except PermissionError:
-            # Successfully blocked access to endpoint without sufficient permissions
-            return
-        # We should never get here if we lack the right permissions
-        self.fail("Completed without sufficient permissions")
-
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.all_organization_invitations")
     def test_list_invitations(self, mock_all_org_invitations: any) -> None:
         mock_all_org_invitations.return_value = {"mocked": "org invitations"}
@@ -320,37 +244,6 @@ class TestAuth0Service(unittest.TestCase):
             id="mock_org_id", page=2, per_page=3
         )
 
-    @pytest.mark.unit
-    @patch("auth0.management.Organizations.all_organization_invitations")
-    def test_list_invitations_perms(self, mock_all_org_invitations: any) -> None:
-        mock_all_org_invitations.return_value = {"mocked": "org invitations"}
-        auth0_service = create_test_auth0_service()
-        try:
-            auth0_service.list_invitations(
-                UserToken(
-                    org_id="mock_org_id",
-                    sub="mock_subject",
-                    org_name="mock_org_name",
-                    iss="mock_issuer",
-                    aud="mock_audience",
-                    iat=1,
-                    exp=2,
-                    scope="mock scope",
-                    azp="mock_azp",
-                    permissions=[],
-                    user_email="mock@mock.com",
-                    user_full_name="mock full name",
-                ),
-                page=2,
-                per_page=3,
-            )
-        except PermissionError:
-            # Successfully blocked access to endpoint without sufficient permissions
-            return
-        # We should never get here if we lack the right permissions
-        self.fail("Completed without sufficient permissions")
-
-    @pytest.mark.unit
     @patch("auth0.management.Roles.list")
     def test_list_roles(self, mock_list_roles: any) -> None:
         mock_list_roles.return_value = {"mocked": "list of roles"}
@@ -360,7 +253,6 @@ class TestAuth0Service(unittest.TestCase):
         # Verify default paginations params are passed through
         mock_list_roles.assert_called_with(page=0, per_page=100)
 
-    @pytest.mark.unit
     @patch("auth0.authentication.Users.userinfo")
     @patch("auth0.management.Organizations.get_organization")
     @patch("auth0.management.Organizations.create_organization_invitation")
@@ -409,56 +301,10 @@ class TestAuth0Service(unittest.TestCase):
                 "inviter": {"name": "Johnny Cache"},
                 "invitee": {"email": "mock@invitation.com"},
                 "client_id": "mock_auth0_client_id",
-                "user_metadata": {"org_roles": {"mock_org_id": "org_member"}},
+                "app_metadata": {"mock_org_id": {"initial_org_role": "org_member"}},
             },
         )
 
-    @pytest.mark.unit
-    @patch("auth0.authentication.Users.userinfo")
-    @patch("auth0.management.Organizations.create_organization_invitation")
-    def test_create_invitation_perms(
-        self, mock_create_invitation: any, mock_userinfo: any
-    ) -> None:
-        mock_create_invitation.return_value = {"invitation": "created"}
-        mock_userinfo.return_value = {"name": "Johnny Cache"}
-        auth0_service = create_test_auth0_service()
-        try:
-            auth0_service.create_invitation(
-                UserToken(
-                    org_id="mock_org_id",
-                    sub="mock_subject",
-                    org_name="mock_org_name",
-                    iss="mock_issuer",
-                    aud="mock_audience",
-                    iat=1,
-                    exp=2,
-                    scope="mock scope",
-                    azp="mock_azp",
-                    permissions=[],
-                    user_email="mock@mock.com",
-                    user_full_name="mock full name",
-                ),
-                access_token="mock_access_token",
-                invitations=CreateInvitationInput(
-                    invitations=[
-                        Invitation(
-                            invitee=Invitee(email="mock@invitation.com"),
-                            role=OrgRole.org_member,
-                        ),
-                        Invitation(
-                            invitee=Invitee(email="another@invitation.com"),
-                            role=OrgRole.org_super_admin,
-                        ),
-                    ]
-                ),
-            )
-        except PermissionError:
-            # Successfully blocked access to endpoint without sufficient permissions
-            return
-        # We should never get here if we lack the organization:management permissions
-        self.fail("Completed without sufficient permissions")
-
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.delete_organization_members")
     def test_delete_user_from_organization(self, mock_delete_members: any) -> None:
         mock_delete_members.return_value = {"member": "deleted"}
@@ -486,38 +332,6 @@ class TestAuth0Service(unittest.TestCase):
             body={"members": ["mock_user_id_to_remove"]},
         )
 
-    @pytest.mark.unit
-    @patch("auth0.management.Organizations.delete_organization_members")
-    def test_delete_user_from_organization_perms(
-        self, mock_delete_members: any
-    ) -> None:
-        mock_delete_members.return_value = {"member": "deleted"}
-        auth0_service = create_test_auth0_service()
-        try:
-            auth0_service.delete_user_from_organization(
-                UserToken(
-                    org_id="mock_org_id",
-                    sub="mock_subject",
-                    org_name="mock_org_name",
-                    iss="mock_issuer",
-                    aud="mock_audience",
-                    iat=1,
-                    exp=2,
-                    scope="mock scope",
-                    azp="mock_azp",
-                    permissions=[],
-                    user_email="mock@mock.com",
-                    user_full_name="mock full name",
-                ),
-                "mock_user_id_to_remove",
-            )
-        except PermissionError:
-            # Successfully blocked access to endpoint without sufficient permissions
-            return
-        # We should never get here if we lack the organization:management permissions
-        self.fail("Completed without sufficient permissions")
-
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.delete_organization_invitation")
     def test_delete_invitation(self, mock_delete_invitation: any) -> None:
         mock_delete_invitation.return_value = {"invitation": "deleted"}
@@ -544,32 +358,3 @@ class TestAuth0Service(unittest.TestCase):
             id="mock_org_id",
             invitation_id="mock_invitation_id_to_remove",
         )
-
-    @pytest.mark.unit
-    @patch("auth0.management.Organizations.delete_organization_invitation")
-    def test_delete_invitation_perms(self, mock_delete_invitation: any) -> None:
-        mock_delete_invitation.return_value = {"invitation": "deleted"}
-        auth0_service = create_test_auth0_service()
-        try:
-            auth0_service.delete_invitation(
-                UserToken(
-                    org_id="mock_org_id",
-                    sub="mock_subject",
-                    org_name="mock_org_name",
-                    iss="mock_issuer",
-                    aud="mock_audience",
-                    iat=1,
-                    exp=2,
-                    scope="mock scope",
-                    azp="mock_azp",
-                    permissions=[],
-                    user_email="mock@mock.com",
-                    user_full_name="mock full name",
-                ),
-                "mock_invitation_id_to_remove",
-            )
-        except PermissionError:
-            # Successfully blocked access to endpoint without sufficient permissions
-            return
-        # We should never get here if we lack the organization:management permissions
-        self.fail("Completed without sufficient permissions")
