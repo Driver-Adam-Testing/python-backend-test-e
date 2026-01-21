@@ -43,7 +43,6 @@ def mock_get_token() -> any:
 
 
 class TestAuth0Service(unittest.TestCase):
-    @pytest.mark.unit
     @patch("auth0.authentication.GetToken.client_credentials")
     def test_get_mgmt_api_token(self, mock_get_token: any) -> None:
         mock_get_token.return_value = {
@@ -56,7 +55,6 @@ class TestAuth0Service(unittest.TestCase):
         mock_get_token.assert_called_with("https://mock_mgmt_api_domain/api/v2/")
         self.assertEqual(response, "mocked_access_token")
 
-    @pytest.mark.unit
     @patch("auth0.authentication.Users.userinfo")
     @patch("auth0.authentication.Database.change_password")
     @patch("auth0.authentication.Database.post")
@@ -94,7 +92,6 @@ class TestAuth0Service(unittest.TestCase):
             organization="mock_org_id",
         )
 
-    @pytest.mark.unit
     @patch("auth0.management.Users.list_organizations")
     def test_list_user_organizations(self, mock_list_organizations: any) -> None:
         mock_list_organizations.return_value = {"mocked": "orgs"}
@@ -120,7 +117,6 @@ class TestAuth0Service(unittest.TestCase):
         # If this needs to change, we can proxy page and per_page calls through too.
         mock_list_organizations.assert_called_with("mock_subject", per_page=100)
 
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.delete_organization_member_roles")
     @patch("auth0.management.Organizations.create_organization_member_roles")
     @patch("auth0.management.Organizations.all_organization_member_roles")
@@ -191,7 +187,6 @@ class TestAuth0Service(unittest.TestCase):
             ),
         )
 
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.all_organization_members")
     def test_list_members(self, mock_list_members: any) -> None:
         mock_list_members.return_value = {"mocked": "listed org members"}
@@ -222,7 +217,6 @@ class TestAuth0Service(unittest.TestCase):
             fields=["user_id", "email", "picture", "name", "roles"],
         )
 
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.all_organization_invitations")
     def test_list_invitations(self, mock_all_org_invitations: any) -> None:
         mock_all_org_invitations.return_value = {"mocked": "org invitations"}
@@ -250,7 +244,6 @@ class TestAuth0Service(unittest.TestCase):
             id="mock_org_id", page=2, per_page=3
         )
 
-    @pytest.mark.unit
     @patch("auth0.management.Roles.list")
     def test_list_roles(self, mock_list_roles: any) -> None:
         mock_list_roles.return_value = {"mocked": "list of roles"}
@@ -260,7 +253,6 @@ class TestAuth0Service(unittest.TestCase):
         # Verify default paginations params are passed through
         mock_list_roles.assert_called_with(page=0, per_page=100)
 
-    @pytest.mark.unit
     @patch("auth0.authentication.Users.userinfo")
     @patch("auth0.management.Organizations.get_organization")
     @patch("auth0.management.Organizations.create_organization_invitation")
@@ -313,7 +305,6 @@ class TestAuth0Service(unittest.TestCase):
             },
         )
 
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.delete_organization_members")
     def test_delete_user_from_organization(self, mock_delete_members: any) -> None:
         mock_delete_members.return_value = {"member": "deleted"}
@@ -341,7 +332,6 @@ class TestAuth0Service(unittest.TestCase):
             body={"members": ["mock_user_id_to_remove"]},
         )
 
-    @pytest.mark.unit
     @patch("auth0.management.Organizations.delete_organization_invitation")
     def test_delete_invitation(self, mock_delete_invitation: any) -> None:
         mock_delete_invitation.return_value = {"invitation": "deleted"}
