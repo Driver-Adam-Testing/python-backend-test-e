@@ -5,7 +5,7 @@ OAuth authentication configuration for MCP server using Auth0.
 import logging
 
 from cryptography.fernet import Fernet
-from fastmcp.server.auth.providers.auth0 import Auth0Provider
+from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.dependencies import get_access_token
 from key_value.aio.stores.memory import MemoryStore
 from key_value.aio.stores.redis import RedisStore
@@ -51,9 +51,14 @@ def _create_storage_backend() -> MemoryStore | RedisStore | FernetEncryptionWrap
         )
 
 
-def create_mcp_oauth_provider() -> Auth0Provider:
+def create_mcp_oauth_provider() -> OIDCProxy:
     """
-    Create Auth0Provider for MCP server OAuth authentication.
+    Create OIDCProxy for MCP server OAuth authentication with Auth0.
+
+    Uses OIDCProxy directly instead of Auth0Provider to allow separate configuration
+    of authorization scopes (including offline_access for refresh tokens) vs token
+    validation scopes. The offline_access scope is needed to obtain refresh tokens
+    but is not included in the access token's scope claim per OAuth2 spec.
 
     Implementation based on: https://fastmcp.wiki/en/deployment/http#mounting-authenticated-servers
 
@@ -84,7 +89,7 @@ def create_mcp_oauth_provider() -> Auth0Provider:
 
     storage = _create_storage_backend()
 
-    auth = Auth0Provider(
+    auth = OIDCProxy(
         config_url=config_url,
         client_id=settings.MCP_AUTH0_CLIENT_ID,
         client_secret=settings.MCP_AUTH0_CLIENT_SECRET,
@@ -93,6 +98,8 @@ def create_mcp_oauth_provider() -> Auth0Provider:
         base_url=mcp_full_url,
         client_storage=storage,
         jwt_signing_key=settings.MCP_JWT_SIGNING_KEY,
+        required_scopes=["openid", "profile", "email"],
+        extra_authorize_params={"scope": "openid profile email offline_access"},
     )
 
     return auth

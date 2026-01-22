@@ -1,65 +1,62 @@
+import asyncio
+import logging
 import os
 import threading
-import time
 import uuid
-from typing import Any
 
 from shared.inspector.inspection.files import comprehend_file_top_down
 from shared.inspector.utils.dag import LiteNode
 
+from .cache import S3BackedTTLCache, TTLCache
 
-class TTLCache:
-    """Thread-safe cache with TTL-based expiration"""
-
-    def __init__(self, default_ttl_seconds: int = 28800) -> None:
-        self._cache: dict[str, tuple[Any, float]] = {}
-        self._lock = threading.Lock()
-        self._default_ttl = default_ttl_seconds
-
-    def put(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
-        now = time.time()
-        ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl
-        expires = now + ttl
-
-        with self._lock:
-            self._evict_expired(now)
-            self._cache[key] = (value, expires)
-
-        return key
-
-    def get(self, key: str) -> Any:
-        now = time.time()
-
-        with self._lock:
-            value, expires = self._cache[key]  # Raises KeyError if missing
-            if expires < now:
-                del self._cache[key]
-                raise KeyError(key)
-            return value
-
-    def delete(self, key: str) -> None:
-        with self._lock:
-            self._cache.pop(key, None)
-
-    def _evict_expired(self, now: float) -> None:
-        keys_to_delete = [k for k, (_, exp) in self._cache.items() if exp < now]
-        for k in keys_to_delete:
-            del self._cache[k]
+logger = logging.getLogger(__name__)
 
 
 # Create cache instances (each with its own lock)
+# Symbol table uses TTLCache with coordinated S3 loading via get_or_load_symbol_table()
 _symbol_table_cache = TTLCache()
-_top_level_cache = TTLCache()
-_tags_cache = TTLCache()
-_diff_content_cache = TTLCache()
-_source_code_cache = TTLCache()
-_tech_doc_output_cache = TTLCache()
-_folder_child_nodes_to_docs_cache = TTLCache()
+
+# All caches are S3-backed for container reschedule resilience
+# Import these directly and use .get()/.put()/.aget()/.aput() methods
+top_level_cache = S3BackedTTLCache(cache_type="top_level")
+tags_cache = S3BackedTTLCache(cache_type="tags")
+source_code_cache = S3BackedTTLCache(cache_type="source_code")
+tech_doc_output_cache = S3BackedTTLCache(cache_type="tech_doc_output")
+diff_content_cache = S3BackedTTLCache(cache_type="diff_content")
+folder_child_nodes_cache = S3BackedTTLCache(cache_type="folder_child_nodes")
+
+# Coordinated loading infrastructure for symbol table
+# Prevents multiple concurrent downloads when cache is cold after container reschedule
+# Uses unified threading locks for both sync and async paths (async uses asyncio.to_thread)
+_symbol_table_load_locks: dict[str, threading.Lock] = {}
+_symbol_table_load_locks_guard = threading.Lock()
+
+
+def _download_symbol_table_sync(version_id: str) -> dict:
+    import boto3
+    from shared.inspector.utils.io import download_symbol_table_from_s3_with_cache
+
+    s3_client = boto3.client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
+    bucket_name = os.environ["INSPECTOR_BUCKET_NAME"]
+
+    return download_symbol_table_from_s3_with_cache(
+        s3_client=s3_client,
+        bucket_name=bucket_name,
+        version_id=version_id,
+    )
 
 
 # Public API - keeps existing interface intact
 def put_symbol_table_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _symbol_table_cache.put(key, value, ttl_seconds)
+    result_key, evicted_keys = _symbol_table_cache.put(key, value, ttl_seconds)
+
+    # Clean up locks for evicted keys to prevent memory leak
+    if evicted_keys:
+        with _symbol_table_load_locks_guard:
+            for evicted_key in evicted_keys:
+                _symbol_table_load_locks.pop(evicted_key, None)
+
+    return result_key
 
 
 def get_symbol_table_cache(key: str) -> dict:
@@ -69,79 +66,72 @@ def get_symbol_table_cache(key: str) -> dict:
 def delete_symbol_table_cache(key: str) -> None:
     _symbol_table_cache.delete(key)
 
-
-def put_top_level_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _top_level_cache.put(key, value, ttl_seconds)
-
-
-def get_top_level_cache(key: str) -> dict:
-    return _top_level_cache.get(key)
+    # Clean up associated lock to prevent memory leak
+    with _symbol_table_load_locks_guard:
+        _symbol_table_load_locks.pop(key, None)
 
 
-def delete_top_level_cache(key: str) -> None:
-    _top_level_cache.delete(key)
+def get_or_load_symbol_table(version_id: str) -> dict:
+    """Get symbol table from cache, or load from S3 with coordination (sync version).
+
+    This function ensures that when multiple tasks need the symbol table on a
+    cold container (after reschedule), only ONE task downloads from S3 while
+    others wait. This prevents memory blowup from concurrent downloads.
+
+    Use get_or_load_symbol_table_async() in async code to avoid blocking the event loop.
+    """
+    try:
+        return _symbol_table_cache.get(version_id)
+    except KeyError:
+        pass
+    return _coordinated_load_symbol_table(version_id)
 
 
-def put_tags_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _tags_cache.put(key, value, ttl_seconds)
+def _coordinated_load_symbol_table(version_id: str) -> dict:
+    """Coordinated symbol table loading used by both sync and async paths.
+
+    Uses threading.Lock for coordination, enabling proper synchronization
+    between sync and async callers (async uses asyncio.to_thread).
+    """
+    with _symbol_table_load_locks_guard:
+        if version_id not in _symbol_table_load_locks:
+            _symbol_table_load_locks[version_id] = threading.Lock()
+        lock = _symbol_table_load_locks[version_id]
+
+    with lock:
+        # Double-check: another thread may have loaded it while we waited
+        try:
+            return _symbol_table_cache.get(version_id)
+        except KeyError:
+            pass
+
+        print(f"Symbol table not in cache, loading from S3 for version {version_id}")
+        symbol_table = _download_symbol_table_sync(version_id)
+        _, evicted_keys = _symbol_table_cache.put(version_id, symbol_table)
+
+        # Clean up locks for evicted keys to prevent memory leak
+        if evicted_keys:
+            with _symbol_table_load_locks_guard:
+                for evicted_key in evicted_keys:
+                    _symbol_table_load_locks.pop(evicted_key, None)
+
+        print(f"Symbol table loaded and cached for version {version_id}")
+        return symbol_table
 
 
-def get_tags_cache(key: str) -> dict:
-    return _tags_cache.get(key)
+async def get_or_load_symbol_table_async(version_id: str) -> dict:
+    """Get symbol table from cache, or load from S3 with coordination (async version).
 
+    This function ensures that when multiple tasks need the symbol table on a
+    cold container (after reschedule), only ONE task downloads from S3 while
+    others wait. Runs coordinated loading in thread to avoid blocking event loop.
+    """
+    try:
+        return _symbol_table_cache.get(version_id)
+    except KeyError:
+        pass
 
-def delete_tags_cache(key: str) -> None:
-    _tags_cache.delete(key)
-
-
-def put_diff_content_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _diff_content_cache.put(key, value, ttl_seconds)
-
-
-def get_diff_content_cache(key: str) -> dict:
-    return _diff_content_cache.get(key)
-
-
-def delete_diff_content_cache(key: str) -> None:
-    _diff_content_cache.delete(key)
-
-
-def put_source_code_cache(key: str, value: str, ttl_seconds: int = 28800) -> str:
-    return _source_code_cache.put(key, value, ttl_seconds)
-
-
-def get_source_code_cache(key: str) -> str:
-    return _source_code_cache.get(key)
-
-
-def delete_source_code_cache(key: str) -> None:
-    _source_code_cache.delete(key)
-
-
-def put_tech_doc_output_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _tech_doc_output_cache.put(key, value, ttl_seconds)
-
-
-def get_tech_doc_output_cache(key: str) -> dict:
-    return _tech_doc_output_cache.get(key)
-
-
-def delete_tech_doc_output_cache(key: str) -> None:
-    _tech_doc_output_cache.delete(key)
-
-
-def put_folder_child_nodes_to_docs_cache(
-    key: str, value: dict, ttl_seconds: int = 28800
-) -> str:
-    return _folder_child_nodes_to_docs_cache.put(key, value, ttl_seconds)
-
-
-def get_folder_child_nodes_to_docs_cache(key: str) -> dict:
-    return _folder_child_nodes_to_docs_cache.get(key)
-
-
-def delete_folder_child_nodes_to_docs_cache(key: str) -> None:
-    _folder_child_nodes_to_docs_cache.delete(key)
+    return await asyncio.to_thread(_coordinated_load_symbol_table, version_id)
 
 
 def make_tech_doc(
@@ -160,9 +150,9 @@ def make_tech_doc(
         request_timeout=FILE_TECH_DOC_LLM_TIMEOUT,
     )
 
-    full_symbol_table = get_symbol_table_cache(version_id)
+    full_symbol_table = get_or_load_symbol_table(version_id)
 
-    source_code = get_source_code_cache(f"{version_id}:{node.root_rel_path}")
+    source_code = source_code_cache.get(f"{version_id}:{node.root_rel_path}")
     reified_symbols = full_symbol_table.get(node.root_rel_path, None)
 
     file_docs_successful, file_doc = comprehend_file_top_down(

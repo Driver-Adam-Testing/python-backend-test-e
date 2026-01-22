@@ -34,15 +34,12 @@ from workflows.inspector_functions import (
 )
 
 from .hatchet_funcs import (
-    delete_folder_child_nodes_to_docs_cache,
-    delete_source_code_cache,
-    delete_tech_doc_output_cache,
-    get_tech_doc_output_cache,
-    put_folder_child_nodes_to_docs_cache,
-    put_source_code_cache,
+    folder_child_nodes_cache,
     put_symbol_table_cache,
-    put_tags_cache,
-    put_top_level_cache,
+    source_code_cache,
+    tags_cache,
+    tech_doc_output_cache,
+    top_level_cache,
 )
 
 TechDocsTask = Union["FileTechDocTask", "FolderTechDocTask", "TopLevelDocsTask"]
@@ -120,7 +117,7 @@ class FolderTechDocTask(Task):
                 if ContentKind(k) in pass_through_content_kinds
             }
         async with folder_tech_docs_sem:
-            put_folder_child_nodes_to_docs_cache(
+            await folder_child_nodes_cache.aput(
                 f"{self.version_id}:{self.node.root_rel_path}",
                 child_nodes_to_docs,
             )
@@ -131,13 +128,18 @@ class FolderTechDocTask(Task):
                 previous_content=previous_content,
             )
             await folder_doc_task.aio_run(
-                folder_doc_input, options=TriggerWorkflowOptions(sticky=True)
+                folder_doc_input,
+                options=TriggerWorkflowOptions(
+                    child_key=f"{self.version_id}:{self.node.root_rel_path}"
+                ),
             )
-            docs = get_tech_doc_output_cache(
+            docs = await tech_doc_output_cache.aget(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            delete_tech_doc_output_cache(f"{self.version_id}:{self.node.root_rel_path}")
-            delete_folder_child_nodes_to_docs_cache(
+            await tech_doc_output_cache.adelete(
+                f"{self.version_id}:{self.node.root_rel_path}"
+            )
+            await folder_child_nodes_cache.adelete(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
         return TaskResult(data={"docs": docs}, serialization=SerializationMethod.JSON)
@@ -312,7 +314,7 @@ class FileTechDocTask(Task):
                 .replace("\\u0000", "")
                 .replace("\x00", "")
             )  # Apparently the \\u0000 and \x00 is an issue with hatchet
-            put_source_code_cache(
+            await source_code_cache.aput(
                 f"{self.version_id}:{self.node.root_rel_path}", cleaned_source
             )
             tech_doc_input = TechDocInput(
@@ -321,13 +323,20 @@ class FileTechDocTask(Task):
                 version_id=self.version_id,
             )
             await tech_doc_task.aio_run(
-                tech_doc_input, options=TriggerWorkflowOptions(sticky=True)
+                tech_doc_input,
+                options=TriggerWorkflowOptions(
+                    child_key=f"{self.version_id}:{self.node.root_rel_path}"
+                ),
             )
-            tech_doc_output = get_tech_doc_output_cache(
+            tech_doc_output = await tech_doc_output_cache.aget(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            delete_source_code_cache(f"{self.version_id}:{self.node.root_rel_path}")
-            delete_tech_doc_output_cache(f"{self.version_id}:{self.node.root_rel_path}")
+            await source_code_cache.adelete(
+                f"{self.version_id}:{self.node.root_rel_path}"
+            )
+            await tech_doc_output_cache.adelete(
+                f"{self.version_id}:{self.node.root_rel_path}"
+            )
             success = tech_doc_output["success"]
             docs = tech_doc_output["file_doc"]
 
@@ -629,7 +638,7 @@ class TopLevelDocsTask(Task):
         children_nodes_to_docs = {
             task.node: dr.data["docs"] for task, dr in dependent_results.items()
         }
-        put_top_level_cache(
+        await top_level_cache.aput(
             str(self.db_version_node_id),
             children_nodes_to_docs,
         )
@@ -638,7 +647,10 @@ class TopLevelDocsTask(Task):
             version_node_id=str(self.db_version_node_id),
         )
         docs = await toplevel_doc_task.aio_run(
-            toplevel_doc_input, options=TriggerWorkflowOptions(sticky=True)
+            toplevel_doc_input,
+            options=TriggerWorkflowOptions(
+                child_key=str(self.db_version_node_id) + ":toplevel"
+            ),
         )
 
         return TaskResult(data={"docs": docs}, serialization=SerializationMethod.JSON)
@@ -834,7 +846,7 @@ class CodebaseTaggingTask(Task):
             children_nodes_to_docs = {
                 task.node: dr.data["docs"] for task, dr in dependent_results.items()
             }
-            put_tags_cache(
+            await tags_cache.aput(
                 str(self.db_root_version_node_id),
                 children_nodes_to_docs,
             )
@@ -844,7 +856,9 @@ class CodebaseTaggingTask(Task):
                     version_node_id=str(self.db_root_version_node_id),
                     content_kinds=content_kinds_to_compute,
                 ),
-                options=TriggerWorkflowOptions(sticky=True),
+                options=TriggerWorkflowOptions(
+                    child_key=str(self.db_root_version_node_id) + ":codebase_tags"
+                ),
             )
 
         return TaskResult(

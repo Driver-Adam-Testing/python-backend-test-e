@@ -138,7 +138,9 @@ class UploadService:
         org_id = user.organization_id
         org_id_hash = hashlib.sha256(org_id.encode()).hexdigest()[:63]
 
-        upload_key = f"assets/{org_id_hash}/{request.page_node_id}/custom_config.toml"
+        upload_key = (
+            f"assets/{org_id_hash}/{request.page_version_node_id}/custom_config.toml"
+        )
         asset_metadata = {
             "unhashed_organization_id": org_id,
         }

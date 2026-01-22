@@ -84,7 +84,7 @@ def get_parallel_workers() -> int:
     """
     Get number of parallel workers for commit processing.
 
-    Returns 7 by default (for 8 vCPU workers, leaving 1 for system overhead).
+    Returns 3 by default (for 8 vCPU workers - N//2 - 1 workers).
     Can be overridden via ANALYTICS_PARALLEL_WORKERS environment variable.
     """
     try:
@@ -98,8 +98,8 @@ def get_parallel_workers() -> int:
     except (ValueError, TypeError):
         pass
 
-    logger.info("Using 7 workers (default)")
-    return 7
+    logger.info("Using 3 workers (default)")
+    return 3
 
 
 def create_chunk_callback(

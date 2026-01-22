@@ -25,12 +25,13 @@ from shared.interfaces.hatchet_interfaces import (
 
 @hatchet.task(
     name="handle-github-events-workflow",
-    execution_timeout=timedelta(minutes=60),
+    execution_timeout=timedelta(minutes=120),
     concurrency=ConcurrencyExpression(
-        max_runs=5,
+        max_runs=2,
         expression="'handle-github-events-workflow'",  # NOTE: must be a string literal to be evaluated as a constant task name
         limit_strategy=ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     ),
+    schedule_timeout=timedelta(minutes=60),
 )
 def handle_github_events_task(input: HandleGithubEventsInput, ctx: Context) -> None:
     print("starting handle github events task")

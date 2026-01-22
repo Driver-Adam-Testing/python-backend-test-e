@@ -335,9 +335,29 @@ def download_and_upload_repo(
     repo_id = repo.get("repo_id") or metadata.get("id") or metadata.get("uuid")
     repo_name = repo.get("repo_name") or repo.get("name")
     workspace = metadata.get("workspace") or repo.get("workspace")
-    repo_slug = "-".join(
-        repo_name.split()
-    )  # Bitbucket allows spaces in repo names, which are replaced by dashes in the slug
+    # Prefer slug from metadata, fallback to name-based slug
+    repo_slug = metadata.get("slug") or repo.get("slug")
+
+    # Fallback: extract from full_name if values are missing or invalid (contain spaces)
+    # Slugs should never contain spaces - if they do, it's a display name not a slug
+    full_name = metadata.get("full_name") or repo.get("full_name")
+    if full_name and "/" in full_name:
+        parts = full_name.split("/", 1)  # Split only once for safety
+        if not workspace or " " in workspace:
+            logger.warning(
+                f"Invalid/missing workspace '{workspace}', extracted from full_name: {parts[0]}"
+            )
+            workspace = parts[0]
+        if not repo_slug or " " in repo_slug:
+            logger.warning(
+                f"Invalid/missing repo_slug '{repo_slug}', extracted from full_name: {parts[1]}"
+            )
+            repo_slug = parts[1]
+
+    if not repo_slug and repo_name:
+        repo_slug = "-".join(
+            repo_name.split()
+        )  # Bitbucket allows spaces in repo names, which are replaced by dashes in the slug
 
     # Handle missing fields
     if not repo_id:

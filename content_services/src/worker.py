@@ -110,15 +110,18 @@ def main() -> None:
     match worker_type:
         case HatchetWorkerType.ANALYTICS:
             workflows = analytics_workflow_set
+            slots = 2
         case HatchetWorkerType.HEAVY:
             workflows = heavy_workflow_set
+            slots = 250
         case HatchetWorkerType.BASE:
             workflows = base_workflow_set
+            slots = 250
         case _:
             raise ValueError(f"Unknown worker type: {worker_type}")
     worker = hatchet.worker(
         f"{worker_type}-worker",
-        slots=250,
+        slots=slots,
         workflows=workflows,
     )
     _wrap_signal_handler(worker, worker_type)

@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import uuid
 from math import ceil
@@ -18,7 +20,14 @@ from .autodocs_prototype import (
     get_autodoc_elapsed_time,
     update_autodocs_status,
 )
+from .checkpoint import (
+    AutoDocsCheckpoint,
+    _download_checkpoint_sync,
+    compute_config_hash,
+)
 from .common import wait_for_guard_duty_tag
+
+logger = logging.getLogger(__name__)
 
 
 async def run_autodoc(
@@ -28,6 +37,7 @@ async def run_autodoc(
     user_context: str | None = None,
     content_kind: ContentKind | None = None,
     hatchet_id: str | None = None,
+    organization_id: str | None = None,  # For checkpoint bucket computation
 ) -> None:
     import hashlib
 
@@ -53,12 +63,17 @@ async def run_autodoc(
 
     is_page = content_kind == ContentKind.application_note or content_kind is None
 
+    content_kind_str = content_kind if content_kind else "application_note"
+
     toml_content = ""
 
     if config_kind == AutoDocConfigKind.FROM_DOCUMENT_GOAL and not document_goal:
         raise ValueError(
             "document_goal is required when config_kind is FROM_DOCUMENT_GOAL"
         )
+
+    # org_id is extracted from DB when possible, falls back to organization_id parameter
+    org_id = None
 
     try:
         # Get document sources given page id
@@ -80,7 +95,6 @@ async def run_autodoc(
                     pdfs=[],
                 )
 
-                org_id = None
                 for source in document_sources:
                     if not org_id:
                         org_id = source.source_version_node.version.primary_asset.organization_id
@@ -118,12 +132,18 @@ async def run_autodoc(
                 )
                 scope.code.append(code_cfg)
 
+        # Fallback to organization_id parameter if not extracted from DB
+        if not org_id and organization_id:
+            org_id = organization_id
+
         match config_kind:
             case AutoDocConfigKind.ADI_DRIVER:
-                config = AutoDocCfg.from_file("/autodocs_configs/adi_driver_page.toml")
+                config = AutoDocCfg.from_file(
+                    "/app/src/autodocs/src/configs/adi_driver_readme.toml"
+                )
             case AutoDocConfigKind.ARCHITECTURE:
                 config = AutoDocCfg.from_file(
-                    "/autodocs_configs/architecture_modal.toml"
+                    "/app/src/autodocs/src/configs/architecture_modal.toml"
                 )
             case AutoDocConfigKind.CUSTOM:
                 if org_id:
@@ -142,36 +162,83 @@ async def run_autodoc(
                         s3.download_file(
                             bucket,
                             key,
-                            "/autodocs_configs/custom_config.toml",
+                            "/app/src/autodocs/src/configs/custom_config.toml",
                         )
                     else:
                         raise ValueError(
                             f"GuardDuty tag not found for bucket {bucket} and key {key}. "
                         )
                     config = AutoDocCfg.from_file(
-                        "/autodocs_configs/custom_config.toml"
+                        "/app/src/autodocs/src/configs/custom_config.toml"
                     )
-                    with open("/autodocs_configs/custom_config.toml") as f:
+                    with open("/app/src/autodocs/src/configs/custom_config.toml") as f:
                         toml_content = f.read()
 
             case AutoDocConfigKind.FROM_DOCUMENT_GOAL:
-                toml_uuid = str(uuid.uuid4())
-                toml_file = f"config_{toml_uuid}.toml"
-                if is_page:
-                    auto_toml = AutoToml.from_page_id(
-                        version_node_id, enable_auto_scaling=True
+                # For FROM_DOCUMENT_GOAL, check for checkpoint BEFORE running AutoTOML
+                # AutoTOML is slow and non-deterministic (produces different sections each run)
+                # If a valid checkpoint exists with saved TOML, we must use it for section consistency
+                if not org_id:
+                    raise ValueError(
+                        "organization_id required for AutoDocs - cannot resolve checkpoint bucket"
                     )
-                else:
-                    auto_toml = AutoToml.from_root_node_id(
-                        root_node_id=version_node_id, enable_auto_scaling=True
-                    )
-                toml_content = await auto_toml.generate(
-                    document_goal=document_goal,
-                    user_context=user_context if user_context else "",
+
+                bucket = os.environ["INSPECTOR_BUCKET_NAME"]
+
+                # First pass: try to load checkpoint with any config (we don't know config_hash yet)
+                # We need to check if TOML content exists to decide whether to run AutoTOML
+                raw_checkpoint = await asyncio.to_thread(
+                    _download_checkpoint_sync,
+                    bucket,
+                    str(version_node_id),
+                    content_kind_str,
+                    None,
                 )
-                with open(toml_file, "w") as f:
-                    f.write(toml_content)
-                config = AutoDocCfg.from_file(toml_file=toml_file)
+
+                if raw_checkpoint and raw_checkpoint.toml_content:
+                    # Valid checkpoint with saved TOML - use it and skip AutoTOML
+                    logger.info(
+                        f"Resuming from checkpoint: phase={raw_checkpoint.current_phase}, "
+                        f"progress={raw_checkpoint.phase_current}/{raw_checkpoint.phase_total}"
+                    )
+                    logger.info(
+                        "Using saved TOML from checkpoint, skipping AutoTOML generation"
+                    )
+                    toml_content = raw_checkpoint.toml_content
+                    config_hash = raw_checkpoint.config_hash
+                    config = AutoDocCfg.from_string(toml_content)
+                    checkpoint = raw_checkpoint
+                else:
+                    # No valid checkpoint - run AutoTOML to generate TOML
+                    if raw_checkpoint:
+                        logger.warning(
+                            "Checkpoint exists but missing toml_content, starting fresh"
+                        )
+                    if is_page:
+                        auto_toml = AutoToml.from_page_id(
+                            version_node_id, enable_auto_scaling=True
+                        )
+                    else:
+                        auto_toml = AutoToml.from_root_node_id(
+                            root_node_id=version_node_id, enable_auto_scaling=True
+                        )
+                    toml_content = await auto_toml.generate(
+                        document_goal=document_goal,
+                        user_context=user_context if user_context else "",
+                    )
+                    config = AutoDocCfg.from_string(toml_content)
+                    config_hash = compute_config_hash(toml_content)
+                    checkpoint = AutoDocsCheckpoint.create_initial(
+                        source_version_node_id=str(version_node_id),
+                        content_kind=content_kind_str,
+                        hatchet_id=hatchet_id,
+                        toml_content=toml_content,
+                        config_hash=config_hash,
+                        use_tagging=config.document.use_tagging,
+                    )
+                    # Save checkpoint immediately after creation to preserve TOML content
+                    # This ensures we can resume with the same sections even if task fails early
+                    await checkpoint.save(bucket)
             case _:
                 raise ValueError(f"Unsupported config kind: {config_kind}")
 
@@ -179,16 +246,68 @@ async def run_autodoc(
         config.scope = scope
         print(config.scope)
 
+        # Checkpoint loading for non-FROM_DOCUMENT_GOAL cases (e.g., CUSTOM)
+        # Note: FROM_DOCUMENT_GOAL handles checkpoint loading BEFORE AutoTOML generation
+        # to avoid running AutoTOML twice (it's slow and non-deterministic)
+        if config_kind != AutoDocConfigKind.FROM_DOCUMENT_GOAL:
+            if not org_id:
+                raise ValueError(
+                    "organization_id required for AutoDocs - cannot resolve checkpoint bucket"
+                )
+            if not toml_content:
+                raise ValueError("toml_content required for AutoDocs checkpointing")
+
+            config_hash = compute_config_hash(toml_content)
+            bucket = os.environ["INSPECTOR_BUCKET_NAME"]
+
+            use_tagging = config.document.use_tagging
+            checkpoint = await AutoDocsCheckpoint.load_for_resume(
+                bucket=bucket,
+                svn_id=str(version_node_id),
+                content_kind=content_kind_str,
+                config_hash=config_hash,
+                use_tagging=use_tagging,
+            )
+
+            if checkpoint:
+                logger.info(
+                    f"Resuming from checkpoint: phase={checkpoint.current_phase}, "
+                    f"progress={checkpoint.phase_current}/{checkpoint.phase_total}"
+                )
+                if checkpoint.toml_content:
+                    toml_content = checkpoint.toml_content
+                    config = AutoDocCfg.from_string(toml_content)
+                    config.scope = scope
+                    logger.info("Using TOML content from checkpoint")
+            else:
+                checkpoint = AutoDocsCheckpoint.create_initial(
+                    source_version_node_id=str(version_node_id),
+                    content_kind=content_kind_str,
+                    hatchet_id=hatchet_id,
+                    toml_content=toml_content,
+                    config_hash=config_hash,
+                    use_tagging=use_tagging,
+                )
+                # Save checkpoint immediately after creation to preserve TOML content
+                await checkpoint.save(bucket)
+
         init_state = await AutoDocInitState.from_cfg(
             cfg=config,
             execution_mode=ExecutionMode.MODAL,
             page_version_node_id=version_node_id,
         )
+
+        # Note: The `resume` parameter is for legacy local file-based resume only.
+        # S3 checkpoint resume is handled via the `checkpoint` parameter.
         doc = await init_state.generate(
             execution_mode=ExecutionMode.MODAL,
+            checkpoint=checkpoint,
+            bucket=bucket,
+            resume=False,  # Legacy local resume disabled; S3 checkpoint handles resume
             source_version_node_id=str(version_node_id),
             hatchet_id=hatchet_id,
         )
+
         elapsed_time_s = await get_autodoc_elapsed_time(
             source_version_node_id=str(version_node_id), hatchet_id=hatchet_id
         )
@@ -297,6 +416,14 @@ async def run_autodoc(
                     misc_metadata=None,
                 )
                 session.add(derived_content)
+
+        # Clean up checkpoint after successful completion
+        try:
+            await checkpoint.delete(bucket)
+            logger.info(f"Deleted autodocs checkpoint for {version_node_id}")
+        except Exception as e:
+            # Deletion failure should not fail the job
+            logger.warning(f"Failed to delete checkpoint (non-fatal): {e}")
 
         return (
             content_kind,

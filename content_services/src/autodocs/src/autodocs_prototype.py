@@ -4,6 +4,7 @@ import concurrent.futures
 import copy
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import tomllib
@@ -38,6 +39,12 @@ from shared.prompts.structured_prompting import (
 from tqdm.asyncio import tqdm_asyncio
 from workflows.autodocs_functions import LLMGenerateInput, llm_generate_task
 
+from .checkpoint import (
+    AutoDocsCheckpoint,
+    AutoDocsPhase,
+    ScatterState,
+)
+
 try:
     with open("local_setup.json") as f:
         LOCAL_FILES: dict[str, str] = json.load(f)
@@ -48,6 +55,8 @@ OPENAI_SEM = asyncio.Semaphore(75)
 PDF_DOWNLOAD_DIR = "pdfs/"
 OPENAI_LIMITER = AsyncLimiter(50, 1)  # 50 requests per second
 MAX_CONCURRENT_ANNOTATIONS = 50
+
+logger = logging.getLogger(__name__)
 
 
 async def llm_generate(llm: ChatOpenAI, system_prompt: str, user_prompt: str) -> str:
@@ -247,7 +256,9 @@ class TechDocsContent(BaseModel):
 class DriverDocsContent(BaseModel):
     codebase_name: str
     version_id: str
-    dag: dict[str, set[str]]
+    dag: dict[
+        str, list[str]
+    ]  # Children sorted alphabetically for deterministic ordering
     content: dict[str, TechDocsContent]
     topo_order: list[str]
 
@@ -302,7 +313,11 @@ class DriverDocsContent(BaseModel):
             try:
                 # Parallelize S3 downloads using ThreadPoolExecutor
                 content = {}
-                s3_client = boto3.client("s3", config=Config(max_pool_connections=50))
+                s3_client = boto3.client(
+                    "s3",
+                    endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"),
+                    config=Config(max_pool_connections=50),
+                )
                 with ThreadPoolExecutor(max_workers=10) as executor:
                     # Submit all download tasks
                     future_to_key = {
@@ -356,7 +371,9 @@ class DriverDocsContent(BaseModel):
             )
             toposort = TopologicalSorter(dag)
 
-            root_short_paragraph = content[codebase_name].short_paragraph_description
+            root_short_paragraph = content[
+                relative_path.rstrip("/")
+            ].short_paragraph_description
             for k in content:
                 if content[k].source is not None:
                     try:
@@ -498,7 +515,7 @@ def _download_pdf_from_s3(version_id: str) -> str:
     download_dir.mkdir(exist_ok=True)
     local_download_path = download_dir / pdf_name
 
-    s3_client = boto3.client("s3")
+    s3_client = boto3.client("s3", endpoint_url=os.environ.get("AWS_S3_ENDPOINT_URL"))
     download_key = f"{primary_asset_id}/{version_id}/{version_node.relative_path}"
     s3_client.download_file(bucket, download_key, str(local_download_path))
 
@@ -508,29 +525,30 @@ def build_file_tree_dag(
     content: dict[str, TechDocsContent],
     codebase_root: str | None,
     exeuction_mode: ExecutionMode,
-) -> dict[str, set[str]]:
+) -> dict[str, list[str]]:
     if exeuction_mode == ExecutionMode.LOCAL and codebase_root is None:
         codebase_root = Path(LOCAL_FILES[codebase_name]["abs_path_of_root_loc"])
     elif codebase_root is not None:
         codebase_root = Path(codebase_root)
     included_nodes = {str(k) for k in content}
-    dag = dict()
+    dag: dict[str, list[str]] = {}
 
     for (
         local_root,
         dirs,
         files,
     ) in os.walk(codebase_root / codebase_name):
-        children = set()
-        for d in dirs:
+        children: list[str] = []
+        # Sort dirs and files for deterministic ordering
+        for d in sorted(dirs):
             root_rel_path = str((Path(local_root) / d).relative_to(codebase_root))
             if root_rel_path in included_nodes:
-                children.add(root_rel_path)
-        for f in files:
+                children.append(root_rel_path)
+        for f in sorted(files):
             root_rel_path = str((Path(local_root) / f).relative_to(codebase_root))
             if root_rel_path in included_nodes:
-                dag[root_rel_path] = set()
-                children.add(root_rel_path)
+                dag[root_rel_path] = []
+                children.append(root_rel_path)
         local_root_rel_path = str(Path(local_root).relative_to(codebase_root))
         if local_root_rel_path in included_nodes:
             dag[local_root_rel_path] = children
@@ -538,20 +556,20 @@ def build_file_tree_dag(
     return dag
 
 
-def build_subgraph(dag: dict[str, set[str]], start: str) -> dict[str, set[str]] | None:
+def build_subgraph(
+    dag: dict[str, list[str]], start: str
+) -> dict[str, list[str]] | None:
     if start not in dag:
         print(f"Node {start} is not present in the DAG.")
         return None
 
-    subgraph = dict()
+    subgraph: dict[str, list[str]] = {}
 
     def dfs(node: str) -> None:
         if node in subgraph:
-            # We've already visited this node.
             return
-        # Add the node to the subgraph with a copy of its children.
         subgraph[node] = dag[node]
-        for child in dag[node]:
+        for child in dag[node]:  # Already sorted from build_file_tree_dag
             dfs(child)
 
     dfs(start)
@@ -1336,6 +1354,9 @@ Your output should be markdown formatted text.
         pdf_tagged_nodes: dict | None,
         tag_idx: int | None,
         section_name: str,
+        checkpoint: AutoDocsCheckpoint,
+        bucket: str,
+        scatter_state: dict[str, ScatterState] | None = None,
     ) -> str:
         print(f"Creating node sections for {section_name}...")
         file_by_file_content = await self.create_node_sections(
@@ -1346,6 +1367,10 @@ Your output should be markdown formatted text.
             tagged_nodes,
             pdf_tagged_nodes,
             tag_idx,
+            section_title=section_name,
+            checkpoint=checkpoint,
+            bucket=bucket,
+            scatter_state=scatter_state,
         )
 
         aggregate_docs = await self.aggregate_node_sections(
@@ -1373,11 +1398,27 @@ Your output should be markdown formatted text.
         tagged_nodes: dict | None,
         pdf_tagged_nodes: dict | None,
         tag_idx: int | None,
+        section_title: str | None = None,
+        checkpoint: AutoDocsCheckpoint | None = None,
+        bucket: str | None = None,
+        scatter_state: dict[str, ScatterState] | None = None,
     ) -> dict:
         init_model = "o3-mini"
         llm = ChatOpenAI(model=init_model, request_timeout=500, temperature=0)
 
-        file_by_file_content = {}
+        # Check if we're resuming from a checkpoint for this section
+        existing_content: dict[str, str] = {}
+        nodes_already_processed = 0
+        if section_title and scatter_state and section_title in scatter_state:
+            existing_state = scatter_state[section_title]
+            existing_content = existing_state.file_by_file_content
+            nodes_already_processed = existing_state.nodes_processed
+            logger.info(
+                f"Resuming scatter for '{section_title}': "
+                f"{nodes_already_processed} nodes already processed"
+            )
+
+        file_by_file_content = dict(existing_content)  # Start with existing content
         node_coroutines = []
         ordered_nodes = []
 
@@ -1435,16 +1476,61 @@ Your output should be markdown formatted text.
 
         # Do it in batches to reduce heartbeat errors in Hatchet
         MAX_CONCURRENT_SCATTER_SECTIONS = 100
-        print(f"Generating {len(node_coroutines)} node sections...")
+        total_nodes = len(node_coroutines)
+        print(f"Generating {total_nodes} node sections...")
+
         for i in range(0, len(node_coroutines), MAX_CONCURRENT_SCATTER_SECTIONS):
+            # Skip batches that were already processed (resume case)
+            if i + MAX_CONCURRENT_SCATTER_SECTIONS <= nodes_already_processed:
+                continue
+
             batch = node_coroutines[i : i + MAX_CONCURRENT_SCATTER_SECTIONS]
             batch_nodes = ordered_nodes[i : i + MAX_CONCURRENT_SCATTER_SECTIONS]
+
+            # For partial batch resume, skip nodes already in file_by_file_content
+            if i < nodes_already_processed:
+                # We're in the middle of a partially-completed batch
+                skip_count = nodes_already_processed - i
+                batch = batch[skip_count:]
+                batch_nodes = batch_nodes[skip_count:]
+                if not batch:
+                    continue
+
             print(
-                f"Generating batch {i // MAX_CONCURRENT_SCATTER_SECTIONS + 1} with {len(batch)} node sections..."
+                f"Generating batch {i // MAX_CONCURRENT_SCATTER_SECTIONS + 1} "
+                f"with {len(batch)} node sections..."
             )
             batch_responses = await asyncio.gather(*batch)
             for ordered_node, response in zip(batch_nodes, batch_responses):
                 file_by_file_content[ordered_node] = response
+
+            # Update scatter_state and checkpoint after each batch
+            if (
+                checkpoint is not None
+                and bucket
+                and section_title
+                and scatter_state is not None
+            ):
+                current_nodes_processed = min(
+                    i + MAX_CONCURRENT_SCATTER_SECTIONS, total_nodes
+                )
+                state = ScatterState(
+                    file_by_file_content=file_by_file_content,
+                    nodes_processed=current_nodes_processed,
+                    nodes_total=total_nodes,
+                )
+                scatter_state[section_title] = state
+                checkpoint.update_phase(
+                    AutoDocsPhase.SECTION_UPDATE,
+                    current=current_nodes_processed,
+                    total=total_nodes,
+                )
+                checkpoint.update_scatter_state(section_title, state)
+                await checkpoint.save(bucket)
+                logger.info(
+                    f"Scatter checkpoint for '{section_title}': "
+                    f"{current_nodes_processed}/{total_nodes} nodes"
+                )
 
         print(f"Created {len(file_by_file_content)} node sections")
         return file_by_file_content
@@ -1652,10 +1738,12 @@ class AutoDocCfg(BaseModel):
     sections: list[SectionCfg]
 
     @classmethod
-    def from_file(cls, toml_file: str) -> Self:
-        with open(toml_file, "rb") as f:
-            raw_data = tomllib.load(f)
+    def _apply_defaults_and_validate(cls, raw_data: dict) -> Self:
+        """Apply default values and validate the config.
 
+        This is the shared implementation for from_file() and from_string().
+        AutoTOML generates minimal TOML that relies on defaults being applied.
+        """
         llm_raw_default = LlmCfg.default().model_dump()
         if "llm" in raw_data:
             raw_data["llm"] = {**llm_raw_default, **raw_data["llm"]}
@@ -1703,6 +1791,22 @@ class AutoDocCfg(BaseModel):
                 )
 
         return cfg
+
+    @classmethod
+    def from_file(cls, toml_file: str) -> Self:
+        with open(toml_file, "rb") as f:
+            raw_data = tomllib.load(f)
+        return cls._apply_defaults_and_validate(raw_data)
+
+    @classmethod
+    def from_string(cls, toml_content: str) -> Self:
+        """Load config from a TOML string.
+
+        Applies the same default merging as from_file() since AutoTOML
+        generates minimal TOML that relies on defaults being applied.
+        """
+        raw_data = tomllib.loads(toml_content)
+        return cls._apply_defaults_and_validate(raw_data)
 
     async def eval_optional_sections(
         self, llm: ChatOpenAI, long_descriptions: str
@@ -2220,31 +2324,56 @@ Your output is the full content of the document with editing updates based on yo
         self,
         llm: ChatOpenAI,
         topo: list[tuple[str, TechDocsContent]],
-        graph: dict[str, set[str]],
+        graph: dict[str, list[str]],
         execution_mode: ExecutionMode,
         pdf_pages_dict: dict[str, list[str]],
+        checkpoint: AutoDocsCheckpoint,
+        bucket: str,
+        existing_annotations: dict[str, list[Category]] | None = None,
+        existing_pdf_annotations: dict | None = None,
+        start_batch_idx: int = 0,
     ) -> dict[str, list[Category]]:
         print(
             f"\n({BLUE}{llm.model}{RESET}) Annotating files for relevance to sections..."
         )
         pidx = 1
         total = len(topo)
-        tagged_nodes: dict[str, list[Category]] = dict()
-        tagged_pdfs = dict()
+        # Initialize with existing annotations if resuming, else empty dict
+        tagged_nodes: dict[str, list[Category]] = (
+            dict(existing_annotations) if existing_annotations else dict()
+        )
+        tagged_pdfs = (
+            dict(existing_pdf_annotations) if existing_pdf_annotations else dict()
+        )
 
         # Annotate files first
         coroutines = []
         for node in topo:
             if node[1].source is not None:
                 coroutines.append(self._annotate_file(llm=llm, node=node))
-        # Process this in groups:
-        for i in range(0, len(coroutines), MAX_CONCURRENT_ANNOTATIONS):
+        # Process this in groups (skip already-processed batches when resuming)
+        num_file_coroutines = len(coroutines)
+        if start_batch_idx > 0:
+            logger.info(
+                f"Resuming annotation from batch index {start_batch_idx}/{num_file_coroutines}"
+            )
+            pidx = start_batch_idx + 1  # Adjust pidx for progress display
+        for i in range(start_batch_idx, len(coroutines), MAX_CONCURRENT_ANNOTATIONS):
             batch = coroutines[i : i + MAX_CONCURRENT_ANNOTATIONS]
             print(f"[{pidx} / {total}] Annotating files...")
             node_results = await tqdm_asyncio.gather(*batch)
             for result in node_results:
                 tagged_nodes[result[0]] = result[1]
             pidx += len(batch)
+
+            # Mid-annotation checkpoint after each batch
+            checkpoint.update_phase(
+                AutoDocsPhase.ANNOTATING,
+                current=i + len(batch),
+                total=num_file_coroutines,
+            )
+            checkpoint.update_annotations(tagged_nodes)
+            await checkpoint.save(bucket)
 
         # Annotate folders after (since they depend on files)
         for p, tech_docs in topo:
@@ -2264,6 +2393,10 @@ Your output is the full content of the document with editing updates based on yo
                     else:
                         node_list.append(Category.Irrelevant)
                 tagged_nodes[p] = node_list
+
+        # Save checkpoint after folder annotations (before PDFs)
+        checkpoint.update_annotations(tagged_nodes)
+        await checkpoint.save(bucket)
 
         if len(self.scope.pdfs) > 0:
             print(
@@ -2285,6 +2418,10 @@ Your output is the full content of the document with editing updates based on yo
                 for result in pdf_results:
                     tagged_pdfs[pdf_path][result[0]] = result[1]
 
+            # Save checkpoint after PDF annotations
+            checkpoint.update_annotations(tagged_nodes, tagged_pdfs)
+            await checkpoint.save(bucket)
+
         return tagged_nodes, tagged_pdfs
 
     async def _initialize_sections(
@@ -2296,6 +2433,9 @@ Your output is the full content of the document with editing updates based on yo
         pdf_annotations: dict,
         execution_mode: ExecutionMode,
         pdf_pages_dict: dict[str, list[str]],
+        checkpoint: AutoDocsCheckpoint,
+        bucket: str,
+        existing_scatter_state: dict[str, ScatterState] | None = None,
     ) -> tuple[set[str], list[dict[str, str]]]:
         if self.scope.pdfs and any(
             s.section_creation_method == SectionCreationMethod.ONLY_PDFS
@@ -2385,6 +2525,12 @@ Your output is the full content of the document with editing updates based on yo
             s.section_creation_method == SectionCreationMethod.SCATTER_GATHER
             for s in self.sections
         ):
+            # Create shared scatter_state dict for mid-scatter checkpointing
+            # Start from existing state if resuming from checkpoint
+            scatter_state: dict[str, ScatterState] = (
+                dict(existing_scatter_state) if existing_scatter_state else {}
+            )
+
             scatter_gather_indices = []
             scatter_gather_coroutines = []
             for idx, s in enumerate(self.sections):
@@ -2401,6 +2547,9 @@ Your output is the full content of the document with editing updates based on yo
                             pdf_tagged_nodes=pdf_annotations,
                             tag_idx=idx,
                             section_name=s.title,
+                            checkpoint=checkpoint,
+                            bucket=bucket,
+                            scatter_state=scatter_state,
                         )
                     )
             scatter_gather_results = await asyncio.gather(*scatter_gather_coroutines)
@@ -2668,6 +2817,8 @@ Your output is the full content of the document with editing updates based on yo
     async def generate(
         self,
         execution_mode: ExecutionMode,
+        checkpoint: AutoDocsCheckpoint,
+        bucket: str,
         resume: bool = False,
         source_version_node_id: str | None = None,
         hatchet_id: str | None = None,
@@ -2715,6 +2866,7 @@ Your output is the full content of the document with editing updates based on yo
 
         # Handle resume
         if resume:
+            # Legacy local resume (for local dev only)
             state = self.load_state()
             revisions = state["revisions"]
             init_state = state["init_state"]
@@ -2731,7 +2883,252 @@ Your output is the full content of the document with editing updates based on yo
             print(
                 f"\n🧙 {CYAN}Whizdoodling{RESET}! to create a document with the following goal:\n{self.document.goal}\n{preamble_content}\n"
             )
-        else:
+            pdf_annotations = None
+        elif checkpoint and checkpoint.current_phase != AutoDocsPhase.INITIALIZING:
+            # S3 checkpoint resume - restore state and skip to appropriate phase
+            logger.info(
+                f"Resuming from S3 checkpoint: phase={checkpoint.current_phase}, "
+                f"progress={checkpoint.phase_current}/{checkpoint.phase_total}"
+            )
+
+            # Restore annotations from checkpoint
+            annotations = checkpoint.annotations
+            pdf_annotations = checkpoint.pdf_annotations
+
+            # Get driver_docs for topo reconstruction
+            driver_docs = self.driver_docs
+
+            # Reconstruct appended_reverse_topo from checkpoint paths
+            # Build a combined content dict from all driver_docs
+            combined_content: dict[str, TechDocsContent] = {}
+            for dd in driver_docs:
+                combined_content.update(dd.content)
+
+            appended_reverse_topo = [
+                (p, combined_content[p])
+                for p in checkpoint.appended_reverse_topo_paths
+                if p in combined_content
+            ]
+
+            # Build joined_graph for annotation lookups
+            joined_graph = {k: v for dd in driver_docs for k, v in dd.dag.items()}
+
+            # Generate source list if we have annotations
+            if annotations:
+                self._source_list = self._generate_sources_list(
+                    annotations=annotations, pdf_annotations=pdf_annotations
+                )
+
+            # Determine what to restore/run based on checkpoint phase
+            if checkpoint.current_phase == AutoDocsPhase.ANNOTATING:
+                # Mid-annotation resume: continue annotation, then run remaining phases
+                logger.info("Resuming mid-annotation phase")
+
+                if execution_mode == ExecutionMode.MODAL:
+                    await update_autodocs_status(
+                        source_version_node_id=source_version_node_id,
+                        status_kind=AutoDocStatusMessageKind.EVALUATING_SOURCES,
+                        content="Resuming source evaluation...",
+                        hatchet_id=hatchet_id,
+                    )
+
+                # Build topo for annotation (needed for _annotate_nodes)
+                subgraphs = []
+                for dd, code_cfg in zip(driver_docs, self.scope.code):
+                    subgraph = build_subgraph(dag=dd.dag, start=code_cfg.node_path)
+                    if subgraph:
+                        subgraphs.append(subgraph)
+                toposorts = [
+                    list(TopologicalSorter(sg).static_order()) for sg in subgraphs
+                ]
+                topos = [
+                    [(p, dd.content[p]) for p in ts]
+                    for ts, dd in zip(toposorts, driver_docs)
+                ]
+                appended_topo = [tup for t in topos for tup in t]
+
+                # Continue annotation from checkpoint
+                annotations, pdf_annotations = await self._annotate_nodes(
+                    llm=llm_tagging,
+                    topo=appended_topo,
+                    graph=joined_graph,
+                    execution_mode=execution_mode,
+                    pdf_pages_dict=pdf_pages_dict,
+                    checkpoint=checkpoint,
+                    bucket=bucket,
+                    existing_annotations=checkpoint.annotations,
+                    existing_pdf_annotations=checkpoint.pdf_annotations,
+                    start_batch_idx=checkpoint.phase_current,
+                )
+                self._source_list = self._generate_sources_list(
+                    annotations=annotations, pdf_annotations=pdf_annotations
+                )
+
+                # Now run section initialization (fresh, since we just completed annotation)
+                if execution_mode == ExecutionMode.MODAL:
+                    await update_autodocs_status(
+                        source_version_node_id=source_version_node_id,
+                        status_kind=AutoDocStatusMessageKind.GENERATING_SECTION_DRAFTS,
+                        content="Generating initial section drafts...",
+                        hatchet_id=hatchet_id,
+                    )
+
+                # Build reverse_topos for section init
+                reverse_topos = [
+                    [(p, dd.content[p]) for p in ts]
+                    for ts, dd in zip(toposorts, driver_docs)
+                ]
+                _ = [rt.reverse() for rt in reverse_topos]
+
+                init_node_set, sections_init = await self._initialize_sections(
+                    llm=llm_section_init,
+                    reverse_topos_from_start=reverse_topos,
+                    driver_docs=driver_docs,
+                    annotations=annotations,
+                    pdf_annotations=pdf_annotations,
+                    execution_mode=execution_mode,
+                    pdf_pages_dict=pdf_pages_dict,
+                    checkpoint=checkpoint,
+                    bucket=bucket,
+                    existing_scatter_state=None,
+                )
+
+                pidx = 1
+                section_state = {"sections": sections_init, "_index": pidx}
+                revisions = [section_state]
+
+                # Checkpoint after section init
+                checkpoint.update_phase(
+                    AutoDocsPhase.SECTION_UPDATE,
+                    current=pidx,
+                    total=len(appended_reverse_topo),
+                )
+                checkpoint.update_annotations(annotations, pdf_annotations)
+                checkpoint.update_sections(section_state["sections"], init_node_set)
+                checkpoint.update_topo_index(pidx)
+                await checkpoint.save(bucket)
+
+            elif checkpoint.current_phase == AutoDocsPhase.SECTION_UPDATE:
+                # Could be mid-scatter or mid-sequential-update
+                if checkpoint.scatter_state:
+                    # Mid-scatter resume: run _initialize_sections with scatter_state
+                    logger.info("Resuming mid-scatter phase")
+
+                    if execution_mode == ExecutionMode.MODAL:
+                        await update_autodocs_status(
+                            source_version_node_id=source_version_node_id,
+                            status_kind=AutoDocStatusMessageKind.GENERATING_SECTION_DRAFTS,
+                            content="Resuming section draft generation...",
+                            hatchet_id=hatchet_id,
+                        )
+
+                    # Build reverse_topos for section init
+                    subgraphs = []
+                    for dd, code_cfg in zip(driver_docs, self.scope.code):
+                        subgraph = build_subgraph(dag=dd.dag, start=code_cfg.node_path)
+                        if subgraph:
+                            subgraphs.append(subgraph)
+                    toposorts = [
+                        list(TopologicalSorter(sg).static_order()) for sg in subgraphs
+                    ]
+                    reverse_topos = [
+                        [(p, dd.content[p]) for p in ts]
+                        for ts, dd in zip(toposorts, driver_docs)
+                    ]
+                    _ = [rt.reverse() for rt in reverse_topos]
+
+                    init_node_set, sections_init = await self._initialize_sections(
+                        llm=llm_section_init,
+                        reverse_topos_from_start=reverse_topos,
+                        driver_docs=driver_docs,
+                        annotations=annotations,
+                        pdf_annotations=pdf_annotations,
+                        execution_mode=execution_mode,
+                        pdf_pages_dict=pdf_pages_dict,
+                        checkpoint=checkpoint,
+                        bucket=bucket,
+                        existing_scatter_state=checkpoint.scatter_state,
+                    )
+
+                    pidx = 1
+                    section_state = {"sections": sections_init, "_index": pidx}
+                    revisions = [section_state]
+
+                    # Checkpoint after section init
+                    checkpoint.update_phase(
+                        AutoDocsPhase.SECTION_UPDATE,
+                        current=pidx,
+                        total=len(appended_reverse_topo),
+                    )
+                    if annotations is not None:
+                        checkpoint.update_annotations(annotations, pdf_annotations)
+                    checkpoint.update_sections(section_state["sections"], init_node_set)
+                    checkpoint.update_topo_index(pidx)
+                    await checkpoint.save(bucket)
+
+                else:
+                    # Post-scatter, mid-sequential-update resume
+                    logger.info(
+                        f"Resuming mid-sequential-update: index={checkpoint.current_topo_index}"
+                    )
+                    init_node_set = (
+                        set(checkpoint.init_node_set)
+                        if checkpoint.init_node_set
+                        else set()
+                    )
+                    section_state = {
+                        "sections": checkpoint.sections_content,
+                        "_index": checkpoint.current_topo_index,
+                    }
+                    pidx = checkpoint.current_topo_index
+                    revisions = [section_state]
+
+            elif checkpoint.current_phase == AutoDocsPhase.UPDATING_PDFS:
+                # Resume mid-PDF-processing
+                logger.info(
+                    f"Resuming mid-PDF-update: index={checkpoint.current_pdf_index}"
+                )
+                init_node_set = (
+                    set(checkpoint.init_node_set) if checkpoint.init_node_set else set()
+                )
+                section_state = {"sections": checkpoint.sections_content, "_index": 0}
+                # Set pidx to skip sequential updates and resume PDF processing
+                # The PDF loop uses: pdf_paths[pidx - total - 1 :]
+                # To start at current_pdf_index, we need: pidx - total - 1 = current_pdf_index
+                # So: pidx = current_pdf_index + total + 1
+                total = len(appended_reverse_topo)
+                pidx = checkpoint.current_pdf_index + total + 1
+                revisions = [section_state]
+
+            elif checkpoint.current_phase in (
+                AutoDocsPhase.FORMATTING,
+                AutoDocsPhase.BEFORE_ASSEMBLY,
+            ):
+                # Skip to formatting or assembly - restore sections and skip prior phases
+                logger.info(f"Resuming from phase: {checkpoint.current_phase}")
+                init_node_set = (
+                    set(checkpoint.init_node_set) if checkpoint.init_node_set else set()
+                )
+                section_state = {"sections": checkpoint.sections_content, "_index": 0}
+                revisions = [section_state]
+                # Mark that we should skip sequential updates and PDF processing
+                # We'll use a flag that the later code checks
+                # For BEFORE_ASSEMBLY, also skip formatting
+                # Set pidx very high to skip all sequential/PDF processing
+                pidx = len(appended_reverse_topo) + len(self.scope.pdfs) + 100
+
+            else:
+                # ASSEMBLING or COMPLETE - shouldn't normally happen, but handle gracefully
+                logger.warning(
+                    f"Unexpected checkpoint phase for resume: {checkpoint.current_phase}, starting fresh"
+                )
+                # Fall through to fresh start by clearing checkpoint
+                checkpoint = None
+
+        # Fresh start - only runs if not resuming
+        if not resume and not (
+            checkpoint and checkpoint.current_phase != AutoDocsPhase.INITIALIZING
+        ):
             # Create path traversal state.
             targets = [
                 [code_cfg.version_id, _get_codebase_name(path=code_cfg.node_path)]
@@ -2774,6 +3171,11 @@ Your output is the full content of the document with editing updates based on yo
             appended_reverse_topo = [tup for rt in reverse_topos for tup in rt]
             joined_graph = {k: v for dd in driver_docs for k, v in dd.dag.items()}
 
+            # Store paths on checkpoint for reconstruction on resume
+            checkpoint.appended_reverse_topo_paths = [
+                p for p, _ in appended_reverse_topo
+            ]
+
             if execution_mode == ExecutionMode.MODAL:
                 await update_autodocs_status(
                     source_version_node_id=source_version_node_id,
@@ -2790,9 +3192,14 @@ Your output is the full content of the document with editing updates based on yo
                     graph=joined_graph,
                     execution_mode=execution_mode,
                     pdf_pages_dict=pdf_pages_dict,
+                    checkpoint=checkpoint,
+                    bucket=bucket,
                 )
                 self._source_list = self._generate_sources_list(
                     annotations=annotations, pdf_annotations=pdf_annotations
+                )
+                logger.info(
+                    f"Annotation phase complete: {len(annotations)} nodes annotated"
                 )
             else:
                 annotations = None
@@ -2814,6 +3221,15 @@ Your output is the full content of the document with editing updates based on yo
             print(
                 f"\n({BLUE}{self.llm.section_init_model}{RESET}) Building initial section drafts for target scope in `{self.scope.code}`..."
             )
+
+            # Get existing scatter state from checkpoint for resume
+            existing_scatter_state = checkpoint.scatter_state
+
+            # Save annotations to checkpoint BEFORE scatter starts, so scatter
+            # checkpoints preserve them (scatter saves don't call update_annotations)
+            if annotations is not None:
+                checkpoint.update_annotations(annotations, pdf_annotations)
+
             init_node_set, sections_init = await self._initialize_sections(
                 llm=llm_section_init,
                 reverse_topos_from_start=reverse_topos,
@@ -2822,6 +3238,9 @@ Your output is the full content of the document with editing updates based on yo
                 pdf_annotations=pdf_annotations,
                 execution_mode=execution_mode,
                 pdf_pages_dict=pdf_pages_dict,
+                checkpoint=checkpoint,
+                bucket=bucket,
+                existing_scatter_state=existing_scatter_state,
             )
             section_state["sections"] = sections_init
             section_state["_index"] = pidx
@@ -2833,12 +3252,28 @@ Your output is the full content of the document with editing updates based on yo
                 "init_node_set": init_node_set,
             }
 
+            # Checkpoint after initialization - ready for section updates
+            checkpoint.update_phase(
+                AutoDocsPhase.SECTION_UPDATE,
+                current=pidx,
+                total=len(appended_reverse_topo),
+            )
+            if annotations is not None:
+                checkpoint.update_annotations(annotations, pdf_annotations)
+            checkpoint.update_sections(section_state["sections"], init_node_set)
+            checkpoint.update_topo_index(pidx)
+            await checkpoint.save(bucket)
+            logger.info(
+                f"Section initialization complete: {len(sections_init)} sections created"
+            )
+
         # Exhaustive updates
         if any(
             s.section_creation_method == SectionCreationMethod.SEQUENTIAL_EDIT
             for s in self.sections
         ):
             total = len(appended_reverse_topo)
+            logger.info(f"Starting sequential updates: {total} nodes to process")
             print(
                 f"\n({BLUE}{self.llm.section_update_model}{RESET}) Iteratively improving the initial state of the documents..."
             )
@@ -2867,11 +3302,22 @@ Your output is the full content of the document with editing updates based on yo
                 revisions.append(new_section_state)
                 section_state = new_section_state
 
+                # Checkpoint after each sequential update (mid-phase)
+                checkpoint.update_phase(
+                    AutoDocsPhase.SECTION_UPDATE, current=pidx, total=total
+                )
+                checkpoint.update_sections(section_state["sections"], init_node_set)
+                checkpoint.update_topo_index(pidx)
+                await checkpoint.save(bucket)
+
+            logger.info(f"Sequential updates complete: processed {pidx - 1} nodes")
+
             if len(self.scope.pdfs) > 0:
                 pdf_paths = _get_pdf_paths(
                     [pdf_cfg.pdf_name for pdf_cfg in self.scope.pdfs],
                     execution_mode=execution_mode,
                 )
+                logger.info(f"Starting PDF updates: {len(pdf_paths)} PDFs to process")
                 for pdf_path in pdf_paths[pidx - total - 1 :]:
                     print(f"Updating sections with content from {pdf_path}...")
                     new_section_state = dict()
@@ -2880,7 +3326,9 @@ Your output is the full content of the document with editing updates based on yo
                         previous_state=section_state["sections"],
                         pdf_path=pdf_path,
                         pdf_pages=pdf_pages_dict[pdf_path],
-                        pdf_annotations=pdf_annotations[pdf_path],
+                        pdf_annotations=pdf_annotations[pdf_path]
+                        if pdf_annotations
+                        else None,
                     )
                     pidx += 1
                     new_section_state["sections"] = section_update
@@ -2888,26 +3336,55 @@ Your output is the full content of the document with editing updates based on yo
                     revisions.append(new_section_state)
                     section_state = new_section_state
 
-        if execution_mode == ExecutionMode.MODAL:
-            await update_autodocs_status(
-                source_version_node_id=source_version_node_id,
-                status_kind=AutoDocStatusMessageKind.OPTIMIZING_SECTION_STRUCTURE,
-                content="Optimizing content structure for each section...",
-                hatchet_id=hatchet_id,
+                    # Checkpoint after each PDF update (UPDATING_PDFS phase)
+                    checkpoint.update_phase(
+                        AutoDocsPhase.UPDATING_PDFS,
+                        current=pidx - total,
+                        total=len(pdf_paths),
+                    )
+                    checkpoint.update_sections(section_state["sections"], init_node_set)
+                    checkpoint.update_topo_index(total)
+                    checkpoint.update_pdf_index(pidx - total)
+                    await checkpoint.save(bucket)
+                logger.info(f"PDF updates complete: processed {len(pdf_paths)} PDFs")
+
+        # Skip formatting if resuming from BEFORE_ASSEMBLY (formatting already done)
+        skip_formatting = (
+            checkpoint is not None
+            and checkpoint.current_phase == AutoDocsPhase.BEFORE_ASSEMBLY
+        )
+
+        if not skip_formatting:
+            logger.info("Starting formatting phase")
+            if execution_mode == ExecutionMode.MODAL:
+                await update_autodocs_status(
+                    source_version_node_id=source_version_node_id,
+                    status_kind=AutoDocStatusMessageKind.OPTIMIZING_SECTION_STRUCTURE,
+                    content="Optimizing content structure for each section...",
+                    hatchet_id=hatchet_id,
+                )
+            # Final output format enforcement
+            print(
+                f"\n({BLUE}{self.llm.section_format_model}{RESET}) Final section output structure pass..."
             )
-        # Final output format enforcement
-        print(
-            f"\n({BLUE}{self.llm.section_format_model}{RESET}) Final section output structure pass..."
-        )
-        new_section_state = dict()
-        final_section_update = await self._final_section_format(
-            llm=llm_section_format, previous_state=section_state["sections"]
-        )
-        pidx += 1
-        new_section_state["sections"] = final_section_update
-        new_section_state["_index"] = pidx
-        revisions.append(new_section_state)
-        section_state = new_section_state
+            new_section_state = dict()
+            final_section_update = await self._final_section_format(
+                llm=llm_section_format, previous_state=section_state["sections"]
+            )
+            pidx += 1
+            new_section_state["sections"] = final_section_update
+            new_section_state["_index"] = pidx
+            revisions.append(new_section_state)
+            section_state = new_section_state
+
+            # Checkpoint before assembly - formatting complete
+            checkpoint.update_phase(AutoDocsPhase.BEFORE_ASSEMBLY)
+            checkpoint.update_sections(section_state["sections"])
+            await checkpoint.save(bucket)
+            logger.info("Formatting phase complete")
+        else:
+            logger.info("Skipping formatting phase (resuming from BEFORE_ASSEMBLY)")
+
         if execution_mode == ExecutionMode.MODAL:
             await update_autodocs_status(
                 source_version_node_id=source_version_node_id,
@@ -2917,6 +3394,7 @@ Your output is the full content of the document with editing updates based on yo
             )
 
         # Final document assembly
+        logger.info("Starting assembly phase")
         final_doc_revisions = []
         print(
             f"\n({BLUE}{self.llm.assembly_model}{RESET}) Full document assembly pass..."
@@ -2952,6 +3430,7 @@ Your output is the full content of the document with editing updates based on yo
         final_doc_revisions.append(final_document)
         final_doc_revisions.append(fix_mermaid_syntax_in_response(text=final_document))
 
+        logger.info("Document generation complete")
         return final_doc_revisions[-1]
 
 

@@ -8,18 +8,18 @@ class UploadRequest(BaseModel):
     file_path: str
 
     @field_validator("file_path")
-    def must_be_zip_or_pdf(cls, v: Any) -> Any:  # noqa: ANN401
+    def must_be_zip_or_pdf(cls, v: Any) -> Any:
         if not v.lower().endswith(".zip") and not v.lower().endswith(".pdf"):
             raise ValueError("file_path must be a zip file or pdf")
         return v
 
 
 class UploadAutoDocConfigRequest(BaseModel):
-    page_node_id: UUID
+    page_version_node_id: UUID
     file_path: str
 
     @field_validator("file_path")
-    def must_be_toml(cls, v: Any) -> Any:  # noqa: ANN401
+    def must_be_toml(cls, v: Any) -> Any:
         if not v.lower().endswith(".toml"):
             raise ValueError("file_path must be a toml")
         return v

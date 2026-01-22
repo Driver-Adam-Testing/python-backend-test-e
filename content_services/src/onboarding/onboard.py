@@ -1041,7 +1041,7 @@ def run_codebase_connection(
         ignored_files = collect_ignored_file_paths(extracted_path)
         tasks = [(file_path, extracted_path) for file_path in all_files]
         folder_results = []
-        with ProcessPoolExecutor(max_workers=28) as executor:
+        with ProcessPoolExecutor(max_workers=3) as executor:
             futures = {executor.submit(process_file, task): task[0] for task in tasks}
             for idx, future in enumerate(as_completed(futures)):
                 path, file_stats = future.result()
