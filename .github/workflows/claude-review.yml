@@ -1,0 +1,38 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review the changes in this PR against the guidelines in CLAUDE.md.
+
+            **Suggest fixes for violations.** This repo has tech debt, so when you find code that violates guidelines, suggest how to fix it.
+
+            Focus on:
+            1. **Clarity of Intent** - Is the code's purpose reasonably clear from structure and naming? Suggest improvements where intent is obscured.
+            2. **Data Structure Oriented Design** - Flag untyped or loosely-typed data where structured types would clarify the contract. Pay special attention to external API boundaries where incoming data shapes should be explicit.
+            3. **Self-Documenting Code** - Flag redundant comments. Suggest better names where possible.
+            4. **Function Design** - Suggest extracting complex logic into well-named helpers
+            5. **Type Hints** - Flag missing or overly generic type hints
+            6. **Code Smells** - Flag DRY violations, deeply nested logic
+
+            For each issue, show a concrete code suggestion. Be concise - only flag meaningful violations.
+          claude_args: "--model claude-opus-4-5-20251101 --max-turns 5"
